@@ -8,6 +8,28 @@ import numpy as np
 import pandas as pd
 from faker import Faker
 
+# Facultatif : si ton modèle attend d’autres noms de colonnes, mappe-les ici.
+FEATURE_RENAME = {
+    # "hemoglobine_g_dl": "hemoglobin",
+    # "hematocrite_l_l": "hematocrit",
+    # "hydratation_verres": "hydration_glasses",
+    # "kcal_total": "effort_kcal",
+    # "kcal_sport": "sport_kcal",
+    # "sommeil_minutes": "sleep_min",
+    # "sommeil_qualite": "sleep_quality",
+    # "stress_niveau": "stress",
+    # "douleur_niveau": "pain",
+}
+
+def _infer_genotype(profile: str) -> str:
+    """Extrait le génotype à partir de la chaîne profil."""
+    s = (profile or "").upper()
+    if " SC" in s or s.endswith(" SC"):
+        return "SC"
+    if " AS" in s or "PORTEUR" in s:
+        return "AS"
+    return "SS"  # par défaut
+
 # ----------------------- Génération -----------------------------------------
 
 def init_fake_data(seed: int = 42, n_patients: int = 12, n_days: int = 60) -> dict:
@@ -79,7 +101,8 @@ def init_fake_data(seed: int = 42, n_patients: int = 12, n_days: int = 60) -> di
         patients.append(patient)
 
         # Séries 30–60 jours
-        series[pid] = _generate_series(n_days=n_days, seed=seed+i)
+        geno = _infer_genotype(patient["profile"])
+        series[pid] = _generate_series(n_days=n_days, seed=seed+i, genotype_code=geno)
 
         # Messages (≥40 au total)
         nb = random.randint(2, 6)
@@ -100,19 +123,20 @@ def init_fake_data(seed: int = 42, n_patients: int = 12, n_days: int = 60) -> di
 
     return {"patients": patients, "series": series, "messages": messages, "doctors": doctors, "resources": resources}
 
-def _generate_series(n_days: int = 60, seed: int = 0) -> pd.DataFrame:
+def _generate_series(n_days: int = 60, seed: int = 0, genotype_code: str = "SS") -> pd.DataFrame:
     rng = np.random.RandomState(seed)
     end = pd.Timestamp.today().normalize()
     dates = pd.date_range(end=end, periods=n_days, freq="D")
 
-    # Risque (random walk borné)
-    risk = [rng.uniform(20, 60)]
+    # --- Risque simulé (fallback) : on le calcule d'abord, et on le remplacera par le modèle si dispo
+    risk_sim = [rng.uniform(20, 60)]
     for _ in range(1, n_days):
-        risk.append(np.clip(risk[-1] + rng.normal(0, 4), 0, 100))
-    # Autres mesures
+        risk_sim.append(np.clip(risk_sim[-1] + rng.normal(0, 4), 0, 100))
+
+    # --- Autres mesures factices
     df = pd.DataFrame({
         "date": dates,
-        "risque": np.round(risk, 1),
+        "risque": np.round(risk_sim, 1),
         "hemoglobine_g_dl": np.clip(rng.normal(9.5, 1.1, size=n_days), 6.5, 12.5).round(1),
         "hematocrite_l_l": np.clip(rng.normal(0.32, 0.05, size=n_days), 0.2, 0.45).round(3),
         "hydratation_verres": np.clip(rng.poisson(6, size=n_days), 0, 12),
@@ -123,6 +147,24 @@ def _generate_series(n_days: int = 60, seed: int = 0) -> pd.DataFrame:
         "stress_niveau": rng.randint(1, 6, size=n_days),
         "douleur_niveau": rng.randint(0, 11, size=n_days),
     })
+
+    # --- Colonnes nécessaires au modèle
+    df["Genotype"] = genotype_code
+
+    # Si nécessaire, renommer pour coller aux noms attendus par le .pkl
+    df_for_model = df.rename(columns=FEATURE_RENAME, errors="ignore").copy()
+
+    # --- ⚙️ Remplacer 'risque' par la prédiction du modèle (si possible)
+    try:
+        keras_path = str(KERAS_PATH) if KERAS_PATH.exists() else None
+        pred = predict_patient_timeseries(df_for_model, str(PKL_PATH), keras_path, alpha=0.6)
+        # 'pred' est en 0..100 – on le met dans la colonne 'risque'
+        df["risque"] = pred.astype(float).round(1)
+    except Exception as e:
+        # Fallback silencieux : on conserve le risque simulé si le modèle ne charge pas
+        # (tu peux aussi logguer/afficher un avertissement côté UI)
+        pass
+
     return df
 
 # ----------------------- Accès / utilitaires --------------------------------
@@ -167,6 +209,20 @@ def add_daily_entry(db: dict, pid: str, **kwargs) -> dict:
         "douleur_niveau": pain,
     }
     new_df = pd.concat([df, pd.DataFrame([row])], ignore_index=True).sort_values("date")
+    # --- Tentative de recalcul via modèle pour la dernière ligne
+    try:
+        geno = _infer_genotype(get_patient(db, pid)["profile"])
+        tmp = new_df.copy()
+        tmp["Genotype"] = geno
+        tmp_for_model = tmp.rename(columns=FEATURE_RENAME, errors="ignore")
+        keras_path = str(KERAS_PATH) if KERAS_PATH.exists() else None
+        pred = predict_patient_timeseries(tmp_for_model, str(PKL_PATH), keras_path, alpha=0.6)
+        # Remplace le risque de la dernière ligne par la prédiction du modèle
+        new_df.loc[new_df.index[-1], "risque"] = float(pred.iloc[-1])
+        row["risque"] = float(pred.iloc[-1])
+    except Exception:
+        # si le modèle échoue, on garde la valeur heuristique déjà dans 'row' / 'new_df'
+        pass
     db["series"][pid] = new_df
     return row
 

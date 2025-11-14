@@ -119,6 +119,12 @@ with tabs[0]:
         )
     with col2:
         ui.sparkline(s_df, y="risque", title="Évolution du risque")
+    # --- Indication : score issu du modèle
+    st.caption("✅ Score de risque issu du modèle (hybride) — démo")
+
+    # (Optionnel) Avertissement si fallback activé par data/model_service
+    if st.session_state.get("model_fallback", False):
+        st.warning("Le modèle n’a pas pu être chargé, risque affiché en mode simulé (fallback).")
 
     # Alerte si dépassement du seuil
     if risk >= patient["thresholds"]["risk_alert"] and patient["notification_prefs"].get("risk_alerts", True):
