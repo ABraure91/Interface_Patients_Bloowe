@@ -13,7 +13,7 @@ import styles
 import ui_components as ui
 import exporter
 
-st.set_page_config(page_title="Bloowe – App Patient (POC)", page_icon="🩺", layout="wide")
+st.set_page_config(page_title="Bloowe – App Léa MALAO (POC)", page_icon="🩺", layout="wide")
 
 # 1) Styles / Design System
 styles.inject()
@@ -21,6 +21,11 @@ styles.inject()
 # 2) Initialisation des données (en session)
 if "db" not in st.session_state:
     st.session_state.db = data.init_fake_data(seed=42, n_patients=12, n_days=60)
+
+    # 🔒 Mode "un seul patient" : fixe l'identité
+    db = st.session_state.db
+    db["patients"][0]["prenom"] = "Léa"
+    db["patients"][0]["nom"] = "MALAO"
 
 # 3) Initialisation de l'état applicatif
 logic.init_state(st.session_state.db)
@@ -30,37 +35,35 @@ pid = st.session_state.selected_patient_id
 
 # --- SIDEBAR (navigation + réglages POC) ------------------------------------
 with st.sidebar:
-    st.markdown("### 🩺 Bloowe – POC App Patient")
-    # Sélection patient (démo)
-    p_options = {f"{p['prenom']} {p['nom']} ({p['id']})": p["id"] for p in data.list_patients(db) if p.get("active", True)}
-    sel_label = st.selectbox("Changer de patient (démo)", list(p_options.keys()),
-                             index=list(p_options.values()).index(pid) if pid in p_options.values() else 0)
-    logic.select_patient(p_options[sel_label])
+    st.markdown("### 🩺 Bloowe – POC (Patiente unique)")
+    patient = data.get_patient(db, pid)
+    # Carte identité compacte
+    st.markdown(
+        f"**{patient['prenom']} {patient['nom']}**  \n"
+        f"{patient['profile']} · {patient['age']} ans  \n"
+        f"📍 {patient['ville']} · {patient['email']}"
+    )
 
+    st.markdown("---")
     # Fenêtre temporelle globale
     col_a, col_b = st.columns(2)
     with col_a:
         st.session_state.date_from = st.date_input(
-            "Début",
-            st.session_state.date_from,
-            max_value=dt.date.today()
+            "Début", st.session_state.date_from, max_value=dt.date.today()
         )
     with col_b:
         st.session_state.date_to = st.date_input(
-            "Fin",
-            st.session_state.date_to,
-            min_value=st.session_state.date_from,
-            max_value=dt.date.today()
+            "Fin", st.session_state.date_to,
+            min_value=st.session_state.date_from, max_value=dt.date.today()
         )
 
-    # Export (simulation d’autorisation)
     st.markdown("---")
     if st.button("📤 Exporter les données (.xlsx)"):
         ok, msg = logic.can_export_patient(pid)
         if ok:
             xls = exporter.export_patient_to_excel(db, pid)
             st.session_state.last_export = xls
-            st.success("Export prêt. Utilisez le bouton ci-dessous pour télécharger (simulation d’autorisation).")
+            st.success("Export prêt. Téléchargez ci-dessous (autorisation simulée).")
         else:
             st.warning(msg)
 
@@ -71,9 +74,6 @@ with st.sidebar:
             file_name=f"export_{pid}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-
-    st.markdown("---")
-    st.caption("**POC** – Aucune donnée réelle. Pas d'API. Tout fonctionne en local.")
 
 # --- HEADER patient ----------------------------------------------------------
 patient = data.get_patient(db, pid)
@@ -177,11 +177,16 @@ with tabs[1]:
     if not convs:
         st.info("Aucune conversation.")
     else:
-        # Sélecteur de conversation
-        opts = {f"{c['doctor']['prenom']} {c['doctor']['nom']} – {c['doctor']['specialite']}": c['doctor']['id'] for c in convs}
-        sel = st.selectbox("Choisir un praticien", list(opts.keys()))
-        did = opts[sel]
-        logic.select_doctor(did)
+        if len(convs) == 1:
+            # Un seul praticien : pas de select
+            did = convs[0]['doctor']['id']
+            logic.select_doctor(did)
+            st.caption(f"Praticien : **{convs[0]['doctor']['prenom']} {convs[0]['doctor']['nom']}** – {convs[0]['doctor']['specialite']}")
+        else:
+            opts = {f"{c['doctor']['prenom']} {c['doctor']['nom']} – {c['doctor']['specialite']}": c['doctor']['id'] for c in convs}
+            sel = st.selectbox("Choisir un praticien", list(opts.keys()))
+            did = opts[sel]
+            logic.select_doctor(did)
 
         # Liste des messages (et marquage lus)
         messages = data.get_messages(db, pid, did)
